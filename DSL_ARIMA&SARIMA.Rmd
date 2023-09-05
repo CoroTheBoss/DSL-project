@@ -1,0 +1,231 @@
+y---
+title: "PROGETTO ARIMA"
+output: word_document
+date: "2023-08-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Importo il datasete del ristorante in questione,  sistemato con python, e trasformo la colonna con data in una colonna con informazioni temporali (per ora è una stringa):
+
+```{r}
+library(lubridate)
+rist1 = read.csv('https://raw.githubusercontent.com/CoroTheBoss/DSL-project/main/Rist1.csv')
+rist1$data = ymd(rist1$data)
+head(rist1)
+```
+
+## Esplorazione dei dati:
+
+Cominciamo con la visualizzazione...
+
+```{r}
+library(ggplot2)
+ggplot(data = rist1, aes(x = data, y = lordototale)) +
+    geom_line() +
+    labs(title = "Serie Temporale", x = "Data", y = "Valore")
+```
+
+Analizzo la stagionalità: la serie pare mostrare una tendenza crescente con una variazione stagionale
+
+```{r}
+ts <- ts(rist1$lordototale, start=c(2019, 1), frequency=365)
+decomposizione <- decompose(ts, type='additive')
+plot(decomposizione)
+```
+
+```{r}
+library(tseries)
+adf_test <- adf.test(ts, alternative = "stationary")
+print(adf_test)
+```
+
+Rimuovo i cvalori nulli alla fine della serie e utilizzo solamente le informazioni successive al covid in modo da ridurre la presenza di outliers:
+
+```{r}
+nocov1 <- rist1[rist1$data >= as.Date("2020-05-07"), ]
+nocov1 <- nocov1[nocov1$data <= as.Date("2023-05-03"), ]
+head(nocov1)
+tail(nocov1)
+```
+
+Rieffettuo la decomposizione e effettuo una nuova analisi di stazionarietà:
+
+```{r}
+tsnc <- ts(nocov1$lordototale, start=c(2020,5), frequency=365)
+decomposizionenc <- decompose(tsnc, type='additive')
+plot(decomposizionenc, col='blue')
+```
+
+- Trend crescente (ci sarà bisogno di un termine di differenziazione *non stagionale* per rendere la serie stazionaria in tendenza)
+- la stagionalità mostra i modelli che si ripetono a intervalli regolari, noto che vi è un pattern che si ripete indicando che la serie ha una componente stagionale (la serie potrebbe beneficiare di un modello sarima che lo tiene in considerazione)
+
+I residui sono la parte non spiegabile da trend e stagionalità (dovrebbero essere idealmente un rumore bianco), se non sembrano esssere distribuiti casualmente attorno allo zero il modello potrebbe aver bisogno di ulteriori miglioramenti.
+
+```{r}
+library(tseries)
+#ts <- ts(nocov1$lordototale, frequency=365)
+adf_test <- adf.test(tsnc)
+print(adf_test)
+```
+
+Si osserva che...
+- p-value < 0.05 : un p-value di 0.01 indica che la serie è stazionaria al livello di significatività del 1%, il che è abbastanza forte
+
+Procediamo col KPSS:
+
+```{r}
+kpss_test <- kpss.test(tsnc)
+print(kpss_test)
+```
+Nel contesto del test KPSS, l'ipotesi nulla è che la serie sia stazionaria attorno ad un trend deterministico. Un valore p molto basso implica che dovresti rifiutare questa ipotesi, suggerendo che la serie temporale non è stazionaria attorno ad un trend. Essendo il nostro p-value così piccolo c'è una forte evidenza che la serie temporale non sia stazionaria.
+
+I due test sono in disaccordo il che potrebbe implicare la presenza di una serie complicata.
+Procediamo l'analisi con la formulazione sia di un modello ARIMA sui residui sia di un modello SARIMA sulla serie originale per vedere quale si adatta meglio al nostro caso.
+
+#ARIMA
+
+Cominciamo importando le librerie necessarie.
+
+```{r}
+library(forecast)
+```
+Procedo col verificarne la stazionarietà:
+
+```{r}
+ts_diff = diff(tsnc)
+plot(ts_diff)
+adf.test(ts_diff, alternative = "stationary")
+kpss.test(ts_diff)
+```
+
+In base ai valori ottenuti possiamo ora considerare la nostra serie stazionaria e procedere con l'analisi.
+
+```{r}
+# Carica il pacchetto necessario
+library(forecast)
+
+# Imposta la lunghezza del set di addestramento iniziale
+initial_train_length <- 730  # Ad esempio, 365 giorni se hai dati giornalieri
+
+# Inizializza un vettore per memorizzare le previsioni
+predictions_a <- numeric(length(tsnc) - initial_train_length)
+
+# Ottieni l'indice temporale della serie temporale
+time_index <- time(tsnc)
+
+# Trova il tempo corrispondente a initial_train_length
+initial_time <- time_index[initial_train_length]
+
+# Esegui la walk-forward validation
+for (t in seq(initial_train_length, length(tsnc) - 1)) {
+  
+  # Ottieni il tempo corrispondente all'indice attuale t
+  current_time <- time_index[t]
+  
+  # Crea il set di addestramento temporaneo
+  temp_train_set <- window(tsnc, end=current_time)
+  
+  # Addestra il modello ARIMA sul set di addestramento temporaneo
+  fit <- Arima(temp_train_set, order=c(5,1,0))
+  
+  # Esegui una previsione per il prossimo punto dati
+  forecast_result_a <- forecast(fit, h=1)
+  
+  # Memorizza la previsione
+  predictions_a[t - initial_train_length + 1] <- forecast_result_a$mean[1]
+}
+
+# Calcola il RMSE
+actual_values_a <- tsnc[(initial_train_length + 1):length(tsnc)]
+rmse <- sqrt(mean((predictions_a - actual_values_a)^2))
+print(paste("RMSE: ", rmse))
+print(accuracy(predictions_a, actual_values_a))
+```
+
+```{r}
+library(ggplot2)
+
+df <- data.frame(Time = seq(initial_train_length + 1, length(tsnc)), 
+                 Actual_Values = actual_values_a, 
+                 Predictions = predictions_a)
+
+# Grafico dei valori effettivi e delle previsioni sovrapposti
+ggplot(df, aes(x = Time)) +
+  geom_line(aes(y = Actual_Values, color = "Actual Values")) +
+  geom_line(aes(y = Predictions, color = "Predictions")) +
+  ggtitle("Actual Values VS Predictions") +
+  xlab("Tempo") +
+  ylab("Valori") +
+  scale_color_manual(values = c("Actual Values" = "blue", "Predictions" = "red"))
+ggsave("ARIMA_predictions.png", width = 10, height = 6)
+
+```
+
+Facciamo ora lo stesso procedimento utilizzando un modello stagionale e valutiamone le prestazioni:
+
+```{r}
+# Carica i pacchetti necessari
+library(forecast)
+
+# Imposta la lunghezza del set di addestramento iniziale (per esempio, 730 giorni)
+initial_train_length <- 730
+
+# Inizializza un vettore per memorizzare le previsioni
+predictions <- numeric(length(tsnc) - initial_train_length)
+
+# Ottieni l'indice temporale della serie temporale
+time_index <- time(tsnc)
+
+# Esegui la walk-forward validation
+for (t in seq(initial_train_length, length(tsnc) - 1)) {
+  
+  # Ottieni il tempo corrispondente all'indice attuale t
+  current_time <- time_index[t]
+  
+  # Crea il set di addestramento temporaneo solo se ha una lunghezza sufficiente
+  if (length(window(tsnc, end=current_time)) > initial_train_length) {
+  
+    temp_train_set <- window(tsnc, end=current_time)
+  
+    # Tenta di addestrare il modello SARIMA, gestendo eventuali errori
+    fit <- tryCatch(Arima(temp_train_set, order=c(5,1,0), seasonal=c(0,1,0)), 
+                    error = function(e) NULL)
+    
+    # Se il modello è stato addestrato con successo, esegui una previsione
+    if (!is.null(fit)) {
+      forecast_result <- forecast(fit, h=1)
+      predictions[t - initial_train_length + 1] <- forecast_result$mean[1]
+    }
+  }
+}
+
+# Estrai i valori attuali che corrispondono alle previsioni
+actual_values <- tsnc[(initial_train_length + 1):length(tsnc)]
+
+# Calcola il RMSE (Root Mean Square Error)
+rmse <- sqrt(mean((predictions - actual_values)^2))
+
+# Stampa il RMSE
+print(paste("RMSE: ", rmse))
+print(accuracy(predictions,actual_values))
+```
+
+```{r}
+library(ggplot2)
+
+df <- data.frame(Time = seq(initial_train_length + 1, length(tsnc)), 
+                 Actual_Values = actual_values, 
+                 Predictions = predictions)
+# Grafico dei valori effettivi e delle previsioni sovrapposti
+ggplot(df, aes(x = Time)) +
+  geom_line(aes(y = Actual_Values, color = "Actual Values")) +
+  geom_line(aes(y = Predictions, color = "Predictions")) +
+  ggtitle("Actual Values VS Predictions") +
+  xlab("Tempo") +
+  ylab("Valori") +
+  scale_color_manual(values = c("Actual Values" = "blue", "Predictions" = "red"))
+```
+
